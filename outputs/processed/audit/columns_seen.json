@@ -1,0 +1,8 @@
+[
+  "Timestamp",
+  "Demand (MW)",
+  "Wind (MW)",
+  "Solar (MW)",
+  "Total Generation (MW)",
+  "__source_file"
+]

@@ -1,0 +1,65 @@
+{
+  "source_files": [
+    "January 2024- June 2025.xlsx"
+  ],
+  "source_sheet": "Report",
+  "timestamp_format": "%d-%m-%Y %H:%M:%S",
+  "configured_columns": {
+    "timestamp": "Timestamp",
+    "load": "Demand (MW)",
+    "solar": "Solar (MW)",
+    "wind": "Wind (MW)"
+  },
+  "rows_after_read_and_empty_row_removal": 12990,
+  "rows_after_timestamp_parse": 12984,
+  "unparseable_timestamp_rows": 6,
+  "duplicate_timestamp_rows_detected": 0,
+  "missing_before_interpolation": {
+    "load": 0,
+    "solar": 0,
+    "wind": 0
+  },
+  "missing_after_short_interpolation": {
+    "load": 0,
+    "solar": 0,
+    "wind": 0
+  },
+  "rows_dropped_for_missing_load": 0,
+  "final_rows": 12984,
+  "train_rows": 10387,
+  "test_rows": 2597,
+  "split_method": "chronological; final 20% held out",
+  "scaler": "StandardScaler fit on training rows only, then applied to test rows",
+  "outlier_summary": {
+    "load": {
+      "q1": 183704.85749999998,
+      "q3": 208060.5275,
+      "iqr_lower_bound": 147171.35249999998,
+      "iqr_upper_bound": 244594.03250000003,
+      "flagged_count": 419,
+      "policy": "flag"
+    },
+    "solar": {
+      "q1": 102.64750000000001,
+      "q3": 33409.71000000001,
+      "iqr_lower_bound": -49857.946250000015,
+      "iqr_upper_bound": 83370.30375000002,
+      "flagged_count": 0,
+      "policy": "flag"
+    },
+    "wind": {
+      "q1": 4438.6975,
+      "q3": 11973.012499999999,
+      "iqr_lower_bound": -6862.774999999998,
+      "iqr_upper_bound": 23274.484999999997,
+      "flagged_count": 318,
+      "policy": "flag"
+    }
+  },
+  "notes": [
+    "No real-data results are asserted in this script.",
+    "IQR flags are screening indicators, not proof of data errors.",
+    "Repeated timestamps cause a stop to prevent accidental loss of regional records.",
+    "If regional data are present, define region handling and aggregation before modelling."
+  ]
+}
