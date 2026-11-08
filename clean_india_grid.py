@@ -16,6 +16,7 @@ Install:
 Example:
     python clean_india_grid.py --input-dir data/raw --output-dir outputs/processed
 """
+
 from pathlib import Path
 import argparse
 import json
@@ -38,9 +39,15 @@ HEADER_ROW = 0
 DATA_FILE = "January 2024- June 2025.xlsx"
 TIMESTAMP_FORMAT = "%d-%m-%Y %H:%M:%S"
 MAX_SHORT_GAP_TO_INTERPOLATE = 2
-TEST_FRACTION = 0.20
+
+# Updated split fractions (70% Train / 15% Validation / 15% Test)
+TRAIN_FRACTION = 0.70
+VAL_FRACTION = 0.15
+TEST_FRACTION = 0.15
+
 OUTLIER_IQR_MULTIPLIER = 1.5
 OUTLIER_POLICY = "flag"  # "flag" or "clip"; prefer "flag" for the first analysis
+
 
 def read_all_excel(input_dir, sheet_name=SHEET_NAME, header=HEADER_ROW):
     """Read only the audited hourly Report sheet, not incompatible older workbooks."""
@@ -56,20 +63,28 @@ def read_all_excel(input_dir, sheet_name=SHEET_NAME, header=HEADER_ROW):
             f"Could not read sheet '{sheet_name}' from {path.name}: {exc}"
         ) from exc
     df["__source_file"] = path.name
-    print(f"Read {path.name} | sheet={sheet_name}: {df.shape[0]} rows x {df.shape[1]} columns")
+    print(
+        f"Read {path.name} | sheet={sheet_name}: {df.shape[0]} rows x {df.shape[1]} columns"
+    )
     return df
 
+
 def require_config():
-    missing = [name for name, value in {
-        "TIMESTAMP_COL": TIMESTAMP_COL,
-        "LOAD_COL": LOAD_COL,
-        "SOLAR_COL": SOLAR_COL,
-    }.items() if not value]
+    missing = [
+        name
+        for name, value in {
+            "TIMESTAMP_COL": TIMESTAMP_COL,
+            "LOAD_COL": LOAD_COL,
+            "SOLAR_COL": SOLAR_COL,
+        }.items()
+        if not value
+    ]
     if missing:
         raise SystemExit(
             "Configure these exact column names after running audit_india_dataset.py: "
             + ", ".join(missing)
         )
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -97,19 +112,23 @@ def main():
         required.append(WIND_COL)
     absent = [c for c in required if c not in raw.columns]
     if absent:
-        raise SystemExit(f"Configured columns not found: {absent}. See outputs/audit/columns_seen.json")
+        raise SystemExit(
+            f"Configured columns not found: {absent}. See outputs/audit/columns_seen.json"
+        )
 
     # Preserve a raw copy for auditing; standardize only the selected analysis columns.
     selected = [TIMESTAMP_COL, LOAD_COL, SOLAR_COL] + ([WIND_COL] if WIND_COL else [])
     if "__source_file" in raw.columns:
         selected.append("__source_file")
     df = raw[selected].copy()
-    df = df.rename(columns={
-        TIMESTAMP_COL: "timestamp",
-        LOAD_COL: "load",
-        SOLAR_COL: "solar",
-        **({WIND_COL: "wind"} if WIND_COL else {}),
-    })
+    df = df.rename(
+        columns={
+            TIMESTAMP_COL: "timestamp",
+            LOAD_COL: "load",
+            SOLAR_COL: "solar",
+            **({WIND_COL: "wind"} if WIND_COL else {}),
+        }
+    )
 
     # Parse timestamps; unparseable timestamps are reported and excluded.
     df["timestamp"] = pd.to_datetime(
@@ -125,7 +144,9 @@ def main():
     # Convert common textual placeholders to missing values via numeric coercion above.
     # Duplicate timestamp rows are reported. If the source contains regional rows,
     # do NOT simply drop them: add a region key and define an aggregation first.
-    duplicate_timestamp_rows = int(df.duplicated(subset=["timestamp"], keep="first").sum())
+    duplicate_timestamp_rows = int(
+        df.duplicated(subset=["timestamp"], keep="first").sum()
+    )
     if duplicate_timestamp_rows:
         # The default is safe only for a single national aggregate series.
         # Stop to avoid silently discarding regional records.
@@ -156,7 +177,13 @@ def main():
 
     if len(numeric_cols) >= 2:
         plt.figure(figsize=(7, 5))
-        sns.heatmap(df[numeric_cols].corr(numeric_only=True), annot=True, fmt=".2f", cmap="coolwarm", center=0)
+        sns.heatmap(
+            df[numeric_cols].corr(numeric_only=True),
+            annot=True,
+            fmt=".2f",
+            cmap="coolwarm",
+            center=0,
+        )
         plt.title("Raw-variable correlation (descriptive, not causal)")
         plt.tight_layout()
         plt.savefig(figdir / "raw_correlation.png", dpi=160)
@@ -218,56 +245,87 @@ def main():
     df["month_cos"] = np.cos(2 * np.pi * (df["month"] - 1) / 12)
 
     df = df.reset_index()
-    # Chronological split; fit scaler on training data only to prevent leakage.
-    df = df.sort_values("timestamp").reset_index(drop=True)
-    split_at = int(len(df) * (1 - TEST_FRACTION))
-    if split_at < 1 or split_at >= len(df):
-        raise SystemExit("Not enough rows for configured chronological split.")
-    train = df.iloc[:split_at].copy()
-    test = df.iloc[split_at:].copy()
 
+    # ==========================================
+    # UPDATED: Chronological 70/15/15 Split
+    # ==========================================
+    df = df.sort_values("timestamp").reset_index(drop=True)
+
+    train_end = int(len(df) * TRAIN_FRACTION)
+    val_end = train_end + int(len(df) * VAL_FRACTION)
+
+    if train_end < 1 or val_end >= len(df) or train_end >= val_end:
+        raise SystemExit("Not enough rows for configured 70/15/15 chronological split.")
+
+    train = df.iloc[:train_end].copy()
+    val = df.iloc[train_end:val_end].copy()
+    test = df.iloc[val_end:].copy()
+
+    # Scale features; fit scaler on training data only to prevent leakage.
     scale_cols = [c for c in numeric_cols if c in train.columns]
     scaler = StandardScaler()
+
     train_scaled = train.copy()
+    val_scaled = val.copy()
     test_scaled = test.copy()
-    train_scaled[[f"{c}_scaled" for c in scale_cols]] = scaler.fit_transform(train[scale_cols])
-    test_scaled[[f"{c}_scaled" for c in scale_cols]] = scaler.transform(test[scale_cols])
+
+    # Fit only on train, transform train, val, and test
+    train_scaled[[f"{c}_scaled" for c in scale_cols]] = scaler.fit_transform(
+        train[scale_cols]
+    )
+    val_scaled[[f"{c}_scaled" for c in scale_cols]] = scaler.transform(val[scale_cols])
+    test_scaled[[f"{c}_scaled" for c in scale_cols]] = scaler.transform(
+        test[scale_cols]
+    )
+
     joblib.dump(scaler, out / "standard_scaler_train_only.joblib")
 
+    # Save outputs
     df.to_csv(out / "cleaned_hourly_data.csv", index=False)
     train_scaled.to_csv(out / "train_scaled.csv", index=False)
+    val_scaled.to_csv(out / "val_scaled.csv", index=False)
     test_scaled.to_csv(out / "test_scaled.csv", index=False)
 
     report = {
         "source_files": [DATA_FILE],
         "source_sheet": SHEET_NAME,
         "timestamp_format": TIMESTAMP_FORMAT,
-        "configured_columns": {"timestamp": TIMESTAMP_COL, "load": LOAD_COL,
-                               "solar": SOLAR_COL, "wind": WIND_COL},
+        "configured_columns": {
+            "timestamp": TIMESTAMP_COL,
+            "load": LOAD_COL,
+            "solar": SOLAR_COL,
+            "wind": WIND_COL,
+        },
         "rows_after_read_and_empty_row_removal": int(len(raw)),
         "rows_after_timestamp_parse": int(len(df)),
         "unparseable_timestamp_rows": bad_timestamp_count,
         "duplicate_timestamp_rows_detected": duplicate_timestamp_rows,
         "missing_before_interpolation": {k: int(v) for k, v in missing_before.items()},
-        "missing_after_short_interpolation": {k: int(v) for k, v in missing_after_interpolation.items()},
+        "missing_after_short_interpolation": {
+            k: int(v) for k, v in missing_after_interpolation.items()
+        },
         "rows_dropped_for_missing_load": int(dropped_missing_target),
         "final_rows": int(len(df)),
         "train_rows": int(len(train)),
+        "val_rows": int(len(val)),
         "test_rows": int(len(test)),
-        "split_method": "chronological; final 20% held out",
-        "scaler": "StandardScaler fit on training rows only, then applied to test rows",
+        "split_method": "chronological; 70% train, 15% validation, 15% test",
+        "scaler": "StandardScaler fit on training rows only, then applied to validation and test rows",
         "outlier_summary": outlier_summary,
         "notes": [
             "No real-data results are asserted in this script.",
             "IQR flags are screening indicators, not proof of data errors.",
             "Repeated timestamps cause a stop to prevent accidental loss of regional records.",
-            "If regional data are present, define region handling and aggregation before modelling."
+            "If regional data are present, define region handling and aggregation before modelling.",
         ],
     }
-    (auditdir / "cleaning_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    (auditdir / "cleaning_report.json").write_text(
+        json.dumps(report, indent=2), encoding="utf-8"
+    )
     print(json.dumps(report, indent=2))
     print(f"\nOutputs written to {out.resolve()}")
     print(f"Charts saved to {figdir.resolve()}")
+
 
 if __name__ == "__main__":
     main()

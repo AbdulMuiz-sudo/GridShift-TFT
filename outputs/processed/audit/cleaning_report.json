@@ -26,10 +26,11 @@
   },
   "rows_dropped_for_missing_load": 0,
   "final_rows": 12984,
-  "train_rows": 10387,
-  "test_rows": 2597,
-  "split_method": "chronological; final 20% held out",
-  "scaler": "StandardScaler fit on training rows only, then applied to test rows",
+  "train_rows": 9088,
+  "val_rows": 1947,
+  "test_rows": 1949,
+  "split_method": "chronological; 70% train, 15% validation, 15% test",
+  "scaler": "StandardScaler fit on training rows only, then applied to validation and test rows",
   "outlier_summary": {
     "load": {
       "q1": 183704.85749999998,
