@@ -1,0 +1,5 @@
+name,hidden_size,attention_head_size,hidden_continuous_size,dropout,learning_rate,batch_size,validation_mae_mw,validation_rmse_mw,checkpoint
+larger,48,4,24,0.15,0.002,64,1874.6223663095834,3616.156387116772,E:\GridShift-TFT\outputs\results\checkpoints\larger\epoch=26-step=7506.ckpt
+balanced,32,4,16,0.1,0.003,64,2019.4064289763437,3846.731048757623,E:\GridShift-TFT\outputs\results\checkpoints\balanced\epoch=16-step=4726.ckpt
+small_fast,16,2,8,0.1,0.01,64,2074.2250022914322,3772.493273225107,E:\GridShift-TFT\outputs\results\checkpoints\small_fast\epoch=17-step=5004.ckpt
+regularized,32,4,16,0.2,0.001,128,2209.4025593280007,4090.8892157219248,E:\GridShift-TFT\outputs\results\checkpoints\regularized\epoch=27-step=3892.ckpt

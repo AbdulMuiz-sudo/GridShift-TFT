@@ -1,0 +1,15 @@
+{
+  "name": "larger",
+  "hidden_size": 48,
+  "attention_head_size": 4,
+  "hidden_continuous_size": 24,
+  "dropout": 0.15,
+  "learning_rate": 0.002,
+  "batch_size": 64,
+  "target": "load one hour ahead (MW)",
+  "loss": "MAE",
+  "optimizer": "Adam (TFT default)",
+  "encoder_hours": 168,
+  "split": "chronological 70/15/15",
+  "device": "gpu"
+}
