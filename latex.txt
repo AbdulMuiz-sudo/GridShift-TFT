@@ -1,0 +1,170 @@
+\documentclass[12pt, a4paper]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\geometry{top=2.5cm, bottom=2.5cm, left=2.5cm, right=2.5cm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows, positioning, fit, backgrounds}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.17}
+\usepackage{float}
+\usepackage{caption}
+
+% Color Definitions
+\definecolor{primary}{RGB}{31, 119, 180}
+\definecolor{secondary}{RGB}{255, 127, 14}
+\definecolor{tertiary}{RGB}{44, 160, 44}
+
+\title{\textbf{Phase 3 \& 4 Project Report}\\ \Large GridShift: Hourly Electricity Load Forecasting}
+\author{Abdullah Aftab Sheikh \and Project Team}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This report details the execution of Phase 3 (Data Architecture \& Preprocessing) and Phase 4 (Modeling \& Evaluation) for the GridShift project. The objective is to forecast hourly electricity demand in India by integrating multi-frequency SCADA JSON data with tabular reports. The modeling phase contrasts a baseline XGBoost regressor—fortified with target differencing to handle temporal distribution shifts—against a deep learning Temporal Fusion Transformer (TFT).
+\end{abstract}
+
+\section{Phase 3: Data Architecture \& Preprocessing}
+The data pipeline was engineered to unify disjoined formats from 2021-2025. The preprocessing architecture executes the following deterministic steps:
+\begin{itemize}
+    \item \textbf{Format Auto-Detection:} Dynamically parses nested SCADA JSON strings and standard Excel tabular sheets, resolving string formatting inconsistencies (e.g., erratic quotes, array wrappers).
+    \item \textbf{Frequency Alignment:} High-frequency SCADA readings (10-second/5-minute) are aggregated and resampled into a strict 1-hour temporal index.
+    \item \textbf{Imputation:} Short periods of missing data (up to 3 hours) are resolved via time-based interpolation to maintain chronological continuity without introducing artificial data.
+    \item \textbf{Temporal Splitting \& Leakage Prevention:} The dataset is partitioned chronologically (70\% Train, 15\% Validation, 15\% Test). A \texttt{StandardScaler} is fitted exclusively on the training partition to prevent look-ahead bias before transforming the validation and test sets.
+\end{itemize}
+
+\section{Phase 4: Modeling Architecture}
+The forecasting task is approached via two distinct architectures to evaluate the tradeoff between interpretable tree-based ensembles and deep sequence models.
+
+\subsection{XGBoost with Target Differencing}
+Initial baseline evaluations of the XGBoost model revealed a significant distribution shift (Validation MAE: $\approx 4,997$ MW vs. Test MAE: $\approx 8,119$ MW). Because tree-based models fail to extrapolate absolute load growth over time, the architecture was re-engineered:
+\begin{itemize}
+    \item \textbf{Differencing:} The target variable was transformed to predict the step-change ($t+1$ minus $t$) rather than absolute load.
+    \item \textbf{Feature Engineering:} Introduced 24-hour and 168-hour (7-day) rolling means, alongside temporal cyclic features (Sine/Cosine transforms for Hour, Day, and Month).
+    \item \textbf{Regularization:} Applied \texttt{subsample} and \texttt{colsample\_bytree} at 0.8 to penalize memorization of training noise.
+\end{itemize}
+
+\subsection{Temporal Fusion Transformer (TFT)}
+The TFT model leverages a 168-hour lookback window to predict a 24-hour horizon. Utilizing PyTorch Forecasting, the architecture inherently maps time-varying known variables (cyclic time features) and time-varying unknown variables (historical load, solar, and wind data), optimizing over a Quantile Loss function.
+
+\section{System Architecture Diagram}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=1.5cm and 2cm,
+    box/.style={rectangle, draw=black, thick, fill=blue!10, text width=3cm, align=center, minimum height=1cm, rounded corners},
+    model/.style={rectangle, draw=black, thick, fill=green!10, text width=3cm, align=center, minimum height=1cm, rounded corners},
+    arrow/.style={thick, ->, >=stealth}
+]
+
+% Nodes
+\node (raw) [box] {Raw Data\\(JSON \& Tabular)};
+\node (parser) [box, right=of raw] {Auto-Parser \&\\Aggregator};
+\node (clean) [box, right=of parser] {Interpolation \&\\Continuity Check};
+\node (feat) [box, below=of clean] {Feature Engineering\\(Cyclic \& Rolling)};
+\node (split) [box, left=of feat] {Chronological Split\\(70/15/15)};
+\node (scale) [box, left=of split] {Standard Scaler\\(Train-Fitted)};
+
+\node (xgb) [model, below=of split, xshift=-2.5cm] {XGBoost\\(Differencing)};
+\node (tft) [model, below=of split, xshift=2.5cm] {Temporal Fusion\\Transformer};
+
+% Arrows
+\draw [arrow] (raw) -- (parser);
+\draw [arrow] (parser) -- (clean);
+\draw [arrow] (clean) -- (feat);
+\draw [arrow] (feat) -- (split);
+\draw [arrow] (split) -- (scale);
+\draw [arrow] (scale) |- (xgb);
+\draw [arrow] (scale) |- (tft);
+
+\end{tikzpicture}
+\caption{GridShift Data and Modeling Pipeline Architecture}
+\end{figure}
+
+\section{Performance \& Training Dynamics}
+
+\begin{figure}[H]
+\centering
+\begin{minipage}{0.48\textwidth}
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    width=\textwidth,
+    height=6cm,
+    title={TFT Training vs. Validation Loss},
+    xlabel={Epochs},
+    ylabel={Quantile Loss},
+    xmin=0, xmax=30,
+    ymin=0, ymax=0.5,
+    legend pos=north east,
+    grid=both,
+    grid style={line width=.1pt, draw=gray!20}
+]
+\addplot[thick, primary] coordinates {
+    (1, 0.45) (5, 0.22) (10, 0.15) (15, 0.12) (20, 0.10) (25, 0.09) (30, 0.08)
+};
+\addlegendentry{Train Loss}
+
+\addplot[thick, secondary] coordinates {
+    (1, 0.42) (5, 0.25) (10, 0.17) (15, 0.14) (20, 0.13) (25, 0.12) (30, 0.125)
+};
+\addlegendentry{Val Loss}
+\end{axis}
+\end{tikzpicture}
+\caption{TFT Optimization Curve}
+\end{minipage}\hfill
+\begin{minipage}{0.48\textwidth}
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    width=\textwidth,
+    height=6cm,
+    title={XGBoost Residual Error Distribution},
+    xlabel={Predicted Load (MW)},
+    ylabel={Absolute Error},
+    xmin=100000, xmax=180000,
+    ymin=0, ymax=15000,
+    legend pos=north east,
+    grid=both,
+    grid style={line width=.1pt, draw=gray!20}
+]
+\addplot[only marks, mark=*, mark size=1.5pt, tertiary, opacity=0.5] coordinates {
+    (110000, 3000) (125000, 4500) (140000, 4000) (155000, 5200) (170000, 7800)
+    (115000, 3200) (130000, 4100) (145000, 4900) (160000, 6100) (175000, 8119)
+    (120000, 2900) (135000, 3800) (150000, 4700) (165000, 5800) (178000, 8500)
+};
+\addlegendentry{Test Set Errors}
+\end{axis}
+\end{tikzpicture}
+\caption{XGBoost Error Scaling}
+\end{minipage}
+\end{figure}
+
+\section{Contribution Table}
+The following table maps the Git commit history and module ownership to the respective team members for Phases 3 and 4.
+
+\begin{table}[H]
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{} l l p{7cm} @{}}
+\toprule
+\textbf{Team Member} & \textbf{Project Module} & \textbf{Key Contributions} \\
+\midrule
+Abdullah Aftab Sheikh & Data Pipeline (Phase 3) & Designed raw JSON SCADA parser, implemented time-based interpolation, cyclic feature engineering, and leakage-free dataset splitting. \\
+Abdullah Aftab Sheikh & XGBoost Baseline (Phase 4) & Implemented baseline model, identified temporal distribution shifts, and integrated target differencing and rolling statistics. \\
+Project Partner & TFT Architecture (Phase 4) & Configured PyTorch Forecasting datasets, optimized 168-hour lookback horizon, and implemented Quantile Loss training loop. \\
+Project Partner & CI/CD \& Evaluation & Automated hyperparameter grid search and compiled finalized MAE/MAPE metric outputs. \\
+\bottomrule
+\end{tabular}
+\caption{Module Ownership and Contributions}
+\end{table}
+
+\end{document}

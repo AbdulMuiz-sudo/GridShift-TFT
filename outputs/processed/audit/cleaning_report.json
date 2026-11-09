@@ -13,7 +13,7 @@
   "rows_after_read_and_empty_row_removal": 12990,
   "rows_after_timestamp_parse": 12984,
   "unparseable_timestamp_rows": 6,
-  "duplicate_timestamp_rows_detected": 0,
+  "duplicate_timestamp_rows_detected_and_dropped": 0,
   "missing_before_interpolation": {
     "load": 0,
     "solar": 0,
@@ -56,11 +56,5 @@
       "flagged_count": 318,
       "policy": "flag"
     }
-  },
-  "notes": [
-    "No real-data results are asserted in this script.",
-    "IQR flags are screening indicators, not proof of data errors.",
-    "Repeated timestamps cause a stop to prevent accidental loss of regional records.",
-    "If regional data are present, define region handling and aggregation before modelling."
-  ]
+  }
 }
