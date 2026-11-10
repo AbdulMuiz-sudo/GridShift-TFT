@@ -1,0 +1,33 @@
+{
+  "name": "small",
+  "hidden_size": 32,
+  "layers": 1,
+  "dropout": 0.0,
+  "learning_rate": 0.001,
+  "batch_size": 128,
+  "validation_mae_mw": 2128.0053269176187,
+  "validation_rmse_mw": 3770.95994022353,
+  "epochs_trained": 30,
+  "target": "Demand (MW), one hour ahead",
+  "lookback_hours": 168,
+  "split": "chronological 70/15/15",
+  "rows": 25678,
+  "split_rows": {
+    "train": 17974,
+    "validation": 3852,
+    "test": 3852
+  },
+  "device": "cpu",
+  "features": [
+    "load",
+    "solar",
+    "wind",
+    "hour_sin",
+    "hour_cos",
+    "dow_sin",
+    "dow_cos",
+    "month_sin",
+    "month_cos"
+  ],
+  "scaling": "mean/std fitted on training rows only"
+}
