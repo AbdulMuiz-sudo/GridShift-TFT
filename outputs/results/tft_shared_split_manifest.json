@@ -1,0 +1,47 @@
+{
+  "loader": "src.data.prepare_data.load_shared_data",
+  "source_files": [
+    "outputs/processed/train_scaled.csv",
+    "outputs/processed/val_scaled.csv",
+    "outputs/processed/test_scaled.csv"
+  ],
+  "target": "target_diff = load(t+1) - load(t); reported prediction = load(t) + predicted_diff",
+  "horizon": "1 hour",
+  "feature_columns": [
+    "hour_sin",
+    "hour_cos",
+    "dow_sin",
+    "dow_cos",
+    "month_sin",
+    "month_cos",
+    "solar",
+    "wind",
+    "load_lag_1",
+    "load_lag_2",
+    "load_lag_24",
+    "solar_lag_1",
+    "wind_lag_1",
+    "load_roll_mean_24",
+    "load_roll_mean_168"
+  ],
+  "partitions": {
+    "train": {
+      "raw_rows": 18022,
+      "model_rows_after_XGBoost_feature_lags": 17854,
+      "first_timestamp": "2021-09-07 23:00:00",
+      "last_timestamp": "2023-09-21 20:00:00"
+    },
+    "validation": {
+      "raw_rows": 3862,
+      "model_rows_after_XGBoost_feature_lags": 3694,
+      "first_timestamp": "2023-09-28 21:00:00",
+      "last_timestamp": "2024-05-11 22:00:00"
+    },
+    "test": {
+      "raw_rows": 3863,
+      "model_rows_after_XGBoost_feature_lags": 3695,
+      "first_timestamp": "2024-06-06 18:00:00",
+      "last_timestamp": "2025-12-06 22:00:00"
+    }
+  }
+}

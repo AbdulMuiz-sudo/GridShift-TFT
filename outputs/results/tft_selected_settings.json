@@ -6,10 +6,10 @@
   "dropout": 0.15,
   "learning_rate": 0.002,
   "batch_size": 64,
-  "target": "load one hour ahead (MW)",
+  "target": "target_diff = load(t+1) - load(t); reported prediction = load(t) + predicted_diff",
   "loss": "MAE",
   "optimizer": "Adam (TFT default)",
   "encoder_hours": 168,
-  "split": "chronological 70/15/15",
+  "shared_split_manifest": "outputs/results/tft_shared_split_manifest.json",
   "device": "gpu"
 }

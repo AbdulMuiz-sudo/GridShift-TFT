@@ -1,23 +1,28 @@
-"""Train and evaluate a leakage-safe Temporal Fusion Transformer (TFT).
+"""GPU TFT training using the same shared data partitions as XGBoost.
 
-Shared handoff implemented here
--------------------------------
-* source: outputs/processed/grid_hourly_merged.csv
-* target: electricity demand (MW) one hour ahead
-* split: chronological 70% / 15% / 15%; latest 15% is the test period
-* available-at-forecast inputs: history of load/solar/wind and calendar values
-
-The script writes tuning results, final metrics/predictions, a learning-curve
-plot, architecture metadata, and a Lightning checkpoint to outputs/results/.
+Both models import ``src.data.prepare_data.load_shared_data()``. That loader
+reads train_scaled.csv, val_scaled.csv, and test_scaled.csv; it does not create
+a new split. This script also uses XGBoost's one-hour demand-change target and
+its engineered, forecast-available input columns.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
+import sys
+import time
 import warnings
 from pathlib import Path
+
+# PyTorch Forecasting can invoke this harmless scikit-learn warning per batch.
+warnings.filterwarnings(
+    "ignore",
+    message=r"X does not have valid feature names, but StandardScaler was fitted with feature names",
+    category=UserWarning,
+)
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -25,7 +30,7 @@ import pandas as pd
 import torch
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-try:  # supports both current and older Lightning installs
+try:
     from lightning.pytorch import Trainer, seed_everything
     from lightning.pytorch.callbacks import Callback, EarlyStopping, ModelCheckpoint
 except ImportError:
@@ -35,50 +40,42 @@ except ImportError:
 from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
 from pytorch_forecasting.metrics import MAE
 
-# PyTorch Forecasting passes unnamed NumPy arrays to scikit-learn scalers that
-# it fitted from DataFrame columns. That harmless internal mismatch otherwise
-# emits this warning once per batch and floods the terminal.
-warnings.filterwarnings(
-    "ignore",
-    message="X does not have valid feature names, but StandardScaler was fitted with feature names",
-    category=UserWarning,
-    module=r"sklearn\\.utils\\.validation",
-)
-
 
 def project_root() -> Path:
-    """Work both from outputs/tft_model.py and src/models/tft_model.py."""
+    """Support both src/models/tft_model.py and this delivered output copy."""
     for folder in Path(__file__).resolve().parents:
-        if (folder / "outputs" / "processed" / "grid_hourly_merged.csv").exists():
+        if (folder / "src" / "data" / "prepare_data.py").exists():
             return folder
     return Path.cwd()
 
 
-PROJECT_ROOT = project_root()
-DEFAULT_DATA = PROJECT_ROOT / "outputs" / "processed" / "grid_hourly_merged.csv"
-RESULTS_DIR = PROJECT_ROOT / "outputs" / "results"
+BASE_DIR = project_root()
+if str(BASE_DIR) not in sys.path:
+    sys.path.append(str(BASE_DIR))
+from src.data.prepare_data import load_shared_data
 
-# All trials use the same data, horizon, and feature availability.  Change this
-# list to add experiments; results are written to tft_tuning.csv.
+RESULTS_DIR = BASE_DIR / "outputs" / "results"
+
+# Copied exactly from src/models/xgboost_model.py.
+FEATURES = [
+    "hour_sin", "hour_cos", "dow_sin", "dow_cos", "month_sin", "month_cos",
+    "solar", "wind", "load_lag_1", "load_lag_2", "load_lag_24",
+    "solar_lag_1", "wind_lag_1", "load_roll_mean_24", "load_roll_mean_168",
+]
+
 TRIALS = [
     {"name": "small_fast", "hidden_size": 16, "attention_head_size": 2,
-     "hidden_continuous_size": 8, "dropout": 0.10, "learning_rate": 0.010,
-     "batch_size": 64},
+     "hidden_continuous_size": 8, "dropout": 0.10, "learning_rate": 0.010, "batch_size": 64},
     {"name": "balanced", "hidden_size": 32, "attention_head_size": 4,
-     "hidden_continuous_size": 16, "dropout": 0.10, "learning_rate": 0.003,
-     "batch_size": 64},
+     "hidden_continuous_size": 16, "dropout": 0.10, "learning_rate": 0.003, "batch_size": 64},
     {"name": "regularized", "hidden_size": 32, "attention_head_size": 4,
-     "hidden_continuous_size": 16, "dropout": 0.20, "learning_rate": 0.001,
-     "batch_size": 128},
+     "hidden_continuous_size": 16, "dropout": 0.20, "learning_rate": 0.001, "batch_size": 128},
     {"name": "larger", "hidden_size": 48, "attention_head_size": 4,
-     "hidden_continuous_size": 24, "dropout": 0.15, "learning_rate": 0.002,
-     "batch_size": 64},
+     "hidden_continuous_size": 24, "dropout": 0.15, "learning_rate": 0.002, "batch_size": 64},
 ]
 
 
 class LearningCurve(Callback):
-    """Collect epoch losses without requiring an external experiment service."""
-
     def __init__(self):
         self.rows = []
 
@@ -94,145 +91,171 @@ class LearningCurve(Callback):
             })
 
 
+class EpochProgress(Callback):
+    """Readable epoch summaries alongside Lightning's batch progress bar."""
+
+    def __init__(self, trial_name: str):
+        self.trial_name = trial_name
+        self.started_at = None
+
+    def on_fit_start(self, trainer, pl_module):
+        self.started_at = time.perf_counter()
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        # Lightning runs one validation sanity check before epoch 1; omit it.
+        if trainer.sanity_checking or self.started_at is None:
+            return
+        completed = trainer.current_epoch + 1
+        elapsed = time.perf_counter() - self.started_at
+        seconds_per_epoch = elapsed / completed
+        remaining = seconds_per_epoch * max(trainer.max_epochs - completed, 0)
+        metrics = trainer.callback_metrics
+        train_loss = metrics.get("train_loss_epoch", metrics.get("train_loss"))
+        val_loss = metrics.get("val_loss")
+        train_text = f"{float(train_loss.detach().cpu()):.2f}" if train_loss is not None else "n/a"
+        val_text = f"{float(val_loss.detach().cpu()):.2f}" if val_loss is not None else "n/a"
+        print(
+            f"[{self.trial_name}] epoch {completed}/{trainer.max_epochs} complete | "
+            f"train loss={train_text} | val loss={val_text} | "
+            f"elapsed={elapsed / 60:.1f} min | est. remaining={remaining / 60:.1f} min",
+            flush=True,
+        )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", type=Path, default=DEFAULT_DATA,
-                        help="Path to grid_hourly_merged.csv")
     parser.add_argument("--max-epochs", type=int, default=30)
     parser.add_argument("--patience", type=int, default=5)
-    parser.add_argument("--encoder-hours", type=int, default=168,
-                        help="History given to TFT (default: 7 days)")
+    parser.add_argument("--encoder-hours", type=int, default=168)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--cpu", action="store_true",
-                        help="Force CPU even when CUDA is available")
+    parser.add_argument("--cpu", action="store_true")
     return parser.parse_args()
 
 
-def load_data(path: Path) -> pd.DataFrame:
-    """Read Abdullah's merged CSV, normalize its known headers, and validate it."""
-    if not path.exists():
-        raise FileNotFoundError(f"CSV not found: {path}")
-    df = pd.read_csv(path)
-    required = {"timestamp", "Demand (MW)", "Solar (MW)", "Wind (MW)"}
+def create_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Exact XGBoost target, horizon, lags, and rolling-statistic features."""
+    df = df.copy().sort_values("timestamp").reset_index(drop=True)
+    required = {"timestamp", "load", "solar", "wind", *FEATURES[:6]}
     missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"Unexpected CSV headers; missing {sorted(missing)}. Found {list(df.columns)}")
-
-    df = df.rename(columns={"Demand (MW)": "load", "Solar (MW)": "solar", "Wind (MW)": "wind"})
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    for column in ("load", "solar", "wind"):
-        df[column] = pd.to_numeric(df[column], errors="coerce")
-    df = df.dropna(subset=["timestamp", "load", "solar", "wind"]).sort_values("timestamp")
-    if df["timestamp"].duplicated().any():
-        raise ValueError("Duplicate timestamps found. Resolve them in the data-preparation step first.")
-    if not df["timestamp"].is_monotonic_increasing:
-        raise ValueError("Timestamps are not chronological after sorting.")
-
-    # Calendar fields are known for every future timestamp. Solar, wind and load
-    # deliberately remain *unknown* future reals, preventing forecast leakage.
-    df["hour_sin"] = np.sin(2 * np.pi * df.timestamp.dt.hour / 24)
-    df["hour_cos"] = np.cos(2 * np.pi * df.timestamp.dt.hour / 24)
-    df["dow_sin"] = np.sin(2 * np.pi * df.timestamp.dt.dayofweek / 7)
-    df["dow_cos"] = np.cos(2 * np.pi * df.timestamp.dt.dayofweek / 7)
-    df["month_sin"] = np.sin(2 * np.pi * (df.timestamp.dt.month - 1) / 12)
-    df["month_cos"] = np.cos(2 * np.pi * (df.timestamp.dt.month - 1) / 12)
-    df["time_idx"] = np.arange(len(df), dtype=np.int64)
-    df["series"] = "india_national"
-    return df.reset_index(drop=True)
+        raise ValueError(f"Shared split is missing columns: {sorted(missing)}")
+    df["target_diff"] = df["load"].shift(-1) - df["load"]
+    df["target_actual"] = df["load"].shift(-1)
+    df["load_lag_1"] = df["load"].shift(1)
+    df["load_lag_2"] = df["load"].shift(2)
+    df["load_lag_24"] = df["load"].shift(24)
+    df["solar_lag_1"] = df["solar"].shift(1)
+    df["wind_lag_1"] = df["wind"].shift(1)
+    df["load_roll_mean_24"] = df["load"].rolling(window=24).mean()
+    df["load_roll_mean_168"] = df["load"].rolling(window=168).mean()
+    return df.dropna(subset=["target_diff", "target_actual", *FEATURES]).reset_index(drop=True)
 
 
-def make_datasets(df: pd.DataFrame, encoder_hours: int):
-    """Build datasets with the exact 70/15/15 chronological handoff split."""
-    n = len(df)
-    train_end = int(n * 0.70)
-    val_end = int(n * 0.85)
+def prepare_shared_partitions():
+    """Load XGBoost's fixed CSVs and create exactly its valid model rows."""
+    train_raw, val_raw, test_raw = load_shared_data()
+    partitions = {
+        "train": create_features(train_raw),
+        "validation": create_features(val_raw),
+        "test": create_features(test_raw),
+    }
+    for name, frame in partitions.items():
+        frame["series"] = "india_national"
+        frame["partition"] = name
+    combined = pd.concat([partitions["train"], partitions["validation"], partitions["test"]], ignore_index=True)
+    combined["time_idx"] = np.arange(len(combined), dtype=np.int64)
+    starts, cursor = {}, 0
+    for name in ("train", "validation", "test"):
+        starts[name] = cursor
+        cursor += len(partitions[name])
+    manifest = {
+        "loader": "src.data.prepare_data.load_shared_data",
+        "source_files": ["outputs/processed/train_scaled.csv", "outputs/processed/val_scaled.csv", "outputs/processed/test_scaled.csv"],
+        "target": "target_diff = load(t+1) - load(t); reported prediction = load(t) + predicted_diff",
+        "horizon": "1 hour",
+        "feature_columns": FEATURES,
+        "partitions": {
+            name: {
+                "raw_rows": int(len(raw)),
+                "model_rows_after_XGBoost_feature_lags": int(len(partitions[name])),
+                "first_timestamp": str(partitions[name].timestamp.iloc[0]),
+                "last_timestamp": str(partitions[name].timestamp.iloc[-1]),
+            }
+            for name, raw in (("train", train_raw), ("validation", val_raw), ("test", test_raw))
+        },
+    }
+    return combined, starts, manifest
+
+
+def make_datasets(combined: pd.DataFrame, starts: dict[str, int], encoder_hours: int):
+    """TFT datasets whose validation/test predictions stay in fixed partitions."""
+    train_end, val_end = starts["validation"], starts["test"]
     if train_end <= encoder_hours:
-        raise ValueError("Training portion is shorter than the encoder history.")
-
-    known_reals = ["time_idx", "hour_sin", "hour_cos", "dow_sin", "dow_cos", "month_sin", "month_cos"]
-    # Only historical values are usable for these. They are excluded from decoder inputs.
-    unknown_reals = ["load", "solar", "wind"]
-
+        raise ValueError("Fixed training split is shorter than encoder-hours.")
     training = TimeSeriesDataSet(
-        df.iloc[:train_end],
-        time_idx="time_idx", target="load", group_ids=["series"],
+        combined.iloc[:train_end], time_idx="time_idx", target="target_diff", group_ids=["series"],
         min_encoder_length=encoder_hours, max_encoder_length=encoder_hours,
         min_prediction_length=1, max_prediction_length=1,
-        time_varying_known_reals=known_reals,
-        time_varying_unknown_reals=unknown_reals,
+        # At prediction t, these are available exactly as they are to XGBoost.
+        time_varying_known_reals=["time_idx", *FEATURES],
+        time_varying_unknown_reals=["target_diff"],
         add_relative_time_idx=True, add_target_scales=True, add_encoder_length=True,
     )
-    # Include earlier rows solely as encoder history; min_prediction_idx ensures
-    # validation and test targets are strictly confined to their own time periods.
     validation = TimeSeriesDataSet.from_dataset(
-        training, df.iloc[:val_end], min_prediction_idx=train_end, stop_randomization=True
+        training, combined.iloc[:val_end], min_prediction_idx=starts["validation"], stop_randomization=True
     )
     testing = TimeSeriesDataSet.from_dataset(
-        training, df, min_prediction_idx=val_end, stop_randomization=True
+        training, combined, min_prediction_idx=starts["test"], stop_randomization=True
     )
-    return training, validation, testing, train_end, val_end
+    return training, validation, testing
 
 
-def predict_frame(model, loader, source: pd.DataFrame) -> pd.DataFrame:
-    """Return timestamp-aligned, inverse-transformed one-step predictions in MW."""
-    prediction = model.predict(loader, mode="prediction", return_index=True)
-    # pytorch-forecasting returns a Prediction named tuple in current releases.
-    values = prediction.output if hasattr(prediction, "output") else prediction[0]
-    index = prediction.index if hasattr(prediction, "index") else prediction[1]
-    values = np.asarray(values).reshape(-1)
-    index = pd.DataFrame(index)
-    pred_time_idx = index["time_idx"].to_numpy()
-    actual = source.set_index("time_idx").loc[pred_time_idx, ["timestamp", "load"]].reset_index()
-    actual["predicted"] = values
-    actual = actual.rename(columns={"load": "actual"})
-    return actual[["timestamp", "time_idx", "actual", "predicted"]]
+def prediction_frame(model, loader, combined: pd.DataFrame) -> pd.DataFrame:
+    """Reconstruct next-hour MW demand exactly as the XGBoost scorer does."""
+    result = model.predict(loader, mode="prediction", return_index=True)
+    output = result.output if hasattr(result, "output") else result[0]
+    index = result.index if hasattr(result, "index") else result[1]
+    time_idx = pd.DataFrame(index)["time_idx"].to_numpy()
+    rows = combined.set_index("time_idx").loc[time_idx, ["timestamp", "load", "target_actual"]].reset_index()
+    rows["predicted_diff"] = np.asarray(output).reshape(-1)
+    rows["predicted"] = rows["load"] + rows["predicted_diff"]
+    rows = rows.rename(columns={"target_actual": "actual"})
+    return rows[["timestamp", "time_idx", "actual", "predicted", "predicted_diff"]]
 
 
-def train_trial(name, config, training, validation, val_source, args, accelerator):
-    """Fit one configuration and return validation MAE plus its best checkpoint."""
+def train_trial(name, config, training, validation, combined, args, accelerator):
     train_loader = training.to_dataloader(train=True, batch_size=config["batch_size"], num_workers=0)
     val_loader = validation.to_dataloader(train=False, batch_size=config["batch_size"], num_workers=0)
-    trial_dir = RESULTS_DIR / "checkpoints" / name
-    checkpoint = ModelCheckpoint(dirpath=trial_dir, monitor="val_loss", mode="min", save_top_k=1)
-    early_stop = EarlyStopping(monitor="val_loss", mode="min", patience=args.patience)
+    checkpoint = ModelCheckpoint(
+        dirpath=RESULTS_DIR / "checkpoints" / name, monitor="val_loss", mode="min", save_top_k=1
+    )
     curve = LearningCurve()
+    progress = EpochProgress(name)
     trainer = Trainer(
         max_epochs=args.max_epochs, accelerator=accelerator, devices=1,
-        callbacks=[checkpoint, early_stop, curve], logger=False, enable_model_summary=False,
-        # TFT's CUDA interpolation backward pass has no deterministic kernel.
-        # Disabling strict determinism permits GPU training; the fixed seed still
-        # makes runs reasonably comparable, though not bit-for-bit identical.
-        gradient_clip_val=0.1, deterministic=False,
+        callbacks=[checkpoint, EarlyStopping(monitor="val_loss", mode="min", patience=args.patience), curve, progress],
+        logger=False, enable_model_summary=False, gradient_clip_val=0.1, deterministic=False,
     )
     model = TemporalFusionTransformer.from_dataset(
         training, learning_rate=config["learning_rate"], hidden_size=config["hidden_size"],
-        attention_head_size=config["attention_head_size"],
-        hidden_continuous_size=config["hidden_continuous_size"], dropout=config["dropout"],
-        loss=MAE(), log_interval=-1, reduce_on_plateau_patience=3,
+        attention_head_size=config["attention_head_size"], hidden_continuous_size=config["hidden_continuous_size"],
+        dropout=config["dropout"], loss=MAE(), log_interval=-1, reduce_on_plateau_patience=3,
     )
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
     best = TemporalFusionTransformer.load_from_checkpoint(checkpoint.best_model_path)
-    val_predictions = predict_frame(best, val_loader, val_source)
-    val_mae = mean_absolute_error(val_predictions.actual, val_predictions.predicted)
-    val_rmse = mean_squared_error(val_predictions.actual, val_predictions.predicted) ** 0.5
-    return best, checkpoint.best_model_path, val_predictions, val_mae, val_rmse, curve.rows
+    val_pred = prediction_frame(best, val_loader, combined)
+    return best, checkpoint.best_model_path, val_pred, mean_absolute_error(val_pred.actual, val_pred.predicted), mean_squared_error(val_pred.actual, val_pred.predicted) ** 0.5, curve.rows
 
 
-def save_curve(history, destination: Path):
-    """Save the selected trial's epoch-by-epoch training and validation losses."""
+def save_curve(history, path: Path):
     history = pd.DataFrame(history)
     plt.figure(figsize=(8, 4))
     if not history.empty:
-        if history["train_loss"].notna().any():
-            plt.plot(history["epoch"], history["train_loss"], label="training loss")
-        plt.plot(history["epoch"], history["validation_loss"], label="validation loss")
-    plt.title("TFT training run")
-    plt.ylabel("MAE loss (normalized by target scale during training)")
-    plt.xlabel("epoch")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(destination, dpi=160)
-    plt.close()
+        if history.train_loss.notna().any():
+            plt.plot(history.epoch, history.train_loss, label="training loss")
+        plt.plot(history.epoch, history.validation_loss, label="validation loss")
+    plt.xlabel("Epoch"); plt.ylabel("MAE loss"); plt.title("Selected TFT training curve")
+    plt.legend(); plt.tight_layout(); plt.savefig(path, dpi=160); plt.close()
 
 
 def main():
@@ -241,48 +264,48 @@ def main():
     seed_everything(args.seed, workers=True)
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     accelerator = "cpu" if args.cpu or not torch.cuda.is_available() else "gpu"
-    print(f"Device: {accelerator}; CUDA available: {torch.cuda.is_available()}")
+    if accelerator == "gpu":
+        torch.set_float32_matmul_precision("high")
+    print(f"Device: {accelerator}; CUDA available: {torch.cuda.is_available()}", flush=True)
 
-    df = load_data(args.data)
-    training, validation, testing, train_end, val_end = make_datasets(df, args.encoder_hours)
-    print(f"Rows: train={train_end}, validation={val_end-train_end}, test={len(df)-val_end}")
+    combined, starts, manifest = prepare_shared_partitions()
+    (RESULTS_DIR / "tft_shared_split_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    print("Fixed shared model rows: " + ", ".join(
+        f"{name}={entry['model_rows_after_XGBoost_feature_lags']}" for name, entry in manifest["partitions"].items()
+    ))
+    training, validation, testing = make_datasets(combined, starts, args.encoder_hours)
 
-    tuning_rows, best_record = [], None
-    for trial in TRIALS:
-        print(f"\nTraining {trial['name']}: {trial}")
-        model, checkpoint, val_pred, val_mae, val_rmse, history = train_trial(
-            trial["name"], trial, training, validation, df, args, accelerator
+    trials, best_record = [], None
+    for config in TRIALS:
+        print(f"\nTraining {config['name']}: {config}")
+        model, ckpt, val_pred, val_mae, val_rmse, history = train_trial(
+            config["name"], config, training, validation, combined, args, accelerator
         )
-        row = {**trial, "validation_mae_mw": val_mae, "validation_rmse_mw": val_rmse,
-               "checkpoint": str(checkpoint)}
-        tuning_rows.append(row)
+        row = {**config, "validation_mae_mw": val_mae, "validation_rmse_mw": val_rmse, "checkpoint": str(ckpt)}
+        trials.append(row)
         if best_record is None or val_mae < best_record["validation_mae_mw"]:
-            best_record = {**row, "model": model, "val_predictions": val_pred, "history": history}
+            best_record = {**row, "model": model, "val_pred": val_pred, "history": history}
             print(f"New best validation MAE: {val_mae:.2f} MW")
 
-    tuning = pd.DataFrame(tuning_rows).sort_values("validation_mae_mw")
-    tuning.to_csv(RESULTS_DIR / "tft_tuning.csv", index=False)
-    best = best_record
-    test_loader = testing.to_dataloader(train=False, batch_size=best["batch_size"], num_workers=0)
-    test_pred = predict_frame(best["model"], test_loader, df)
+    pd.DataFrame(trials).sort_values("validation_mae_mw").to_csv(RESULTS_DIR / "tft_tuning.csv", index=False)
+    test_loader = testing.to_dataloader(train=False, batch_size=best_record["batch_size"], num_workers=0)
+    test_pred = prediction_frame(best_record["model"], test_loader, combined)
     test_mae = mean_absolute_error(test_pred.actual, test_pred.predicted)
     test_rmse = mean_squared_error(test_pred.actual, test_pred.predicted) ** 0.5
-
-    best["val_predictions"].to_csv(RESULTS_DIR / "tft_validation_predictions.csv", index=False)
+    best_record["val_pred"].to_csv(RESULTS_DIR / "tft_validation_predictions.csv", index=False)
     test_pred.to_csv(RESULTS_DIR / "tft_test_predictions.csv", index=False)
     pd.DataFrame([
-        {"dataset": "validation", "MAE_MW": best["validation_mae_mw"], "RMSE_MW": best["validation_rmse_mw"], "trial": best["name"]},
-        {"dataset": "test", "MAE_MW": test_mae, "RMSE_MW": test_rmse, "trial": best["name"]},
+        {"dataset": "validation", "MAE_MW": best_record["validation_mae_mw"], "RMSE_MW": best_record["validation_rmse_mw"], "trial": best_record["name"]},
+        {"dataset": "test", "MAE_MW": test_mae, "RMSE_MW": test_rmse, "trial": best_record["name"]},
     ]).to_csv(RESULTS_DIR / "tft_metrics.csv", index=False)
-    save_curve(best["history"], RESULTS_DIR / "tft_training_curve.png")
-    # Keep a stable, obvious checkpoint name as the saved model weight.
-    Path(best["checkpoint"]).replace(RESULTS_DIR / "tft_best.ckpt")
-    architecture = {k: v for k, v in best.items() if k in TRIALS[0]}
-    architecture.update({"target": "load one hour ahead (MW)", "loss": "MAE", "optimizer": "Adam (TFT default)",
-                         "encoder_hours": args.encoder_hours, "split": "chronological 70/15/15",
-                         "device": accelerator})
-    (RESULTS_DIR / "tft_selected_settings.json").write_text(json.dumps(architecture, indent=2), encoding="utf-8")
-    print(f"\nBest trial: {best['name']} | val MAE={best['validation_mae_mw']:.2f} MW | test MAE={test_mae:.2f} MW")
+    save_curve(best_record["history"], RESULTS_DIR / "tft_training_curve.png")
+    os.replace(best_record["checkpoint"], RESULTS_DIR / "tft_best.ckpt")
+    selected = {key: best_record[key] for key in TRIALS[0]}
+    selected.update({"target": manifest["target"], "loss": "MAE", "optimizer": "Adam (TFT default)",
+                     "encoder_hours": args.encoder_hours, "shared_split_manifest": "outputs/results/tft_shared_split_manifest.json",
+                     "device": accelerator})
+    (RESULTS_DIR / "tft_selected_settings.json").write_text(json.dumps(selected, indent=2), encoding="utf-8")
+    print(f"\nBest trial: {best_record['name']} | val MAE={best_record['validation_mae_mw']:.2f} MW | test MAE={test_mae:.2f} MW")
     print(f"Results saved in {RESULTS_DIR}")
 
 
