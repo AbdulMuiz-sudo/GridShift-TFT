@@ -1,33 +1,52 @@
 {
-  "name": "small",
-  "hidden_size": 32,
+  "name": "balanced",
+  "hidden_size": 64,
   "layers": 1,
   "dropout": 0.0,
   "learning_rate": 0.001,
   "batch_size": 128,
-  "validation_mae_mw": 2128.0053269176187,
-  "validation_rmse_mw": 3770.95994022353,
-  "epochs_trained": 30,
-  "target": "Demand (MW), one hour ahead",
+  "validation_mae_mw": 1998.0467451244026,
+  "validation_rmse_mw": 3762.9000390382903,
+  "epochs_trained": 16,
+  "target": "load(t+1)-load(t), reconstructed to Demand (MW)",
   "lookback_hours": 168,
-  "split": "chronological 70/15/15",
-  "rows": 25678,
-  "split_rows": {
-    "train": 17974,
-    "validation": 3852,
-    "test": 3852
+  "split": "provided chronological train/validation/test CSVs",
+  "source_files": [
+    "outputs/processed/train_scaled.csv",
+    "outputs/processed/val_scaled.csv",
+    "outputs/processed/test_scaled.csv"
+  ],
+  "source_rows": {
+    "train": 18022,
+    "validation": 3862,
+    "test": 3863
   },
-  "device": "cpu",
+  "model_rows": {
+    "train": 17854,
+    "validation": 3694,
+    "test": 3695
+  },
+  "predicted_rows": {
+    "train": 17687,
+    "validation": 3527,
+    "test": 3528
+  },
   "features": [
-    "load",
-    "solar",
-    "wind",
     "hour_sin",
     "hour_cos",
     "dow_sin",
     "dow_cos",
     "month_sin",
-    "month_cos"
+    "month_cos",
+    "solar",
+    "wind",
+    "load_lag_1",
+    "load_lag_2",
+    "load_lag_24",
+    "solar_lag_1",
+    "wind_lag_1",
+    "load_roll_mean_24",
+    "load_roll_mean_168"
   ],
-  "scaling": "mean/std fitted on training rows only"
+  "scaling": "feature and target mean/std fit on training split only"
 }
