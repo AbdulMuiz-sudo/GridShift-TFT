@@ -1,94 +1,103 @@
 \documentclass[11pt,a4paper]{article}
-\usepackage[margin=0.8in]{geometry}
+\usepackage[margin=0.72in]{geometry}
 \usepackage[T1]{fontenc}
-\usepackage{lmodern,microtype,graphicx,float,booktabs,array,longtable,enumitem,hyperref,xurl,amsmath,tikz,pgfplots}
+\usepackage{lmodern,microtype,graphicx,float,booktabs,array,longtable,enumitem,hyperref,xurl,amsmath,tikz,pgfplots,xcolor}
 \usetikzlibrary{arrows.meta,positioning,shapes.geometric}
 \pgfplotsset{compat=1.18}
-\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
+\hypersetup{colorlinks=true,linkcolor=blue!60!black,urlcolor=blue!60!black}
 \setlength{\parskip}{0.45em}\setlength{\parindent}{0pt}
-\title{\textbf{GridShift: Electricity Demand Forecasting}\\\large Phases 1--4: Data, Methods, Results, and Contributions}
+\title{\textbf{GridShift Electricity Demand Forecasting}\\\large Phase 3 Model Architecture and Phase 4 Evaluation}
 \author{Abdul Muiz 24L-2501 \textbar{} Abdullah Aftab 24L-2553 \textbar{} Arqum Umais 24L-2591\\AI BDS-5B \textbar{} Track B: Research \textbar{} Instructor: Ms. Bushra Rashid}
 \date{November 2026}
 \begin{document}\maketitle
 \begin{abstract}
-This report documents the GridShift hourly electricity-demand forecasting study from problem definition through experimental results. TFT and LSTM were evaluated on the same 25,678 complete rows using a chronological 70/15/15 split and a one-hour-ahead demand target. TFT achieved validation MAE 1,874.62 MW and test MAE 3,542.41 MW. The supplied CPU LSTM run achieved validation MAE 2,128.01 MW and test MAE 4,258.34 MW. The older XGBoost run is excluded from these findings because its data report lists 12,984 rows. 
+This report documents three one-hour-ahead electricity-demand models: XGBoost, an LSTM, and a Temporal Fusion Transformer (TFT). All load the same chronological train, validation, and test CSVs. The shared files contain 25,747 rows, derived from a 37,392-timestamp merged input. On the held-out test period, TFT has the lowest reported MAE (2,985.18 MW), followed by LSTM (3,567.73 MW) and XGBoost (4,619.62 MW). The LSTM uses fewer prediction timestamps because it requires a 168-row sequence; that sample-count difference is stated when comparing results.
 \end{abstract}
-\section{Phase 1: Problem and Scope}
-The task is one-hour-ahead forecasting of hourly electricity demand (MW) from historical demand, solar generation, wind generation, and calendar features. The research audience includes grid-planning analysts, renewable-energy researchers, and forecasting practitioners. This is an offline research comparison and is not a dispatch or control system. MAE and RMSE are regression metrics; classification accuracy does not apply.
+\section{Phase 2: Current data and cleaning lineage}
+The modeling source is \texttt{outputs/processed/grid\_hourly\_merged.csv}, with 37,392 hourly timestamps from 2021-09-01 00:00 to 2025-12-06 23:00. The current \texttt{cleaneddata.py} workflow deduplicates timestamps, resamples to hourly frequency, interpolates internal gaps up to three hours, removes rows with unresolved missing demand, creates cyclical calendar terms, and scales load, solar, and wind using training statistics only. It retains 25,747 rows for modeling. The earlier 12,984-row audit summary referred to an unrelated workbook and is superseded by the corrected cleaning report.
 
-The research question is how TFT and LSTM forecast demand on the shared chronological evaluation and how errors differ in the later holdout. The study is observational: associations between renewable generation and load do not establish causation.
-\section{Phase 2: Data and Preprocessing}
-The dataset is Mukherjee, Kalita, and Kumar (2025), \textit{Electricity Demand, Solar and Wind Generation Data (September 2021--June 2025) of India at 1-hour interval}, Mendeley Data Version 2, DOI \url{https://doi.org/10.17632/y58jknpgs8.2}. The modeling input is \texttt{outputs/processed/grid\_hourly\_merged.csv}. After requiring valid timestamps and numeric demand, solar, and wind values, the shared modeling table contains 25,678 complete rows.
+\begin{table}[H]\centering\caption{Chronological shared data splits.}\begin{tabular}{lrr}\toprule Split & Rows & Share \\\midrule Train & 18,022 & 70\% \\ Validation & 3,862 & 15\% \\ Test & 3,863 & 15\% \\ \midrule Total & 25,747 & 100\% \\\bottomrule\end{tabular}\end{table}
 
-Rows remain in chronological order. The splits are 17,974 training rows, 3,852 validation rows, and 3,852 test rows. The target is demand one hour ahead. Feature and target scaling for LSTM is fitted on training rows only. Validation MAE selects model configuration; test data remains held out for final reporting.
-\section{Phase 3: Model Architecture and Training}
-\subsection{LSTM architecture}
-The LSTM receives 168 past hourly observations with nine features: demand, solar, wind, and sine/cosine encodings for hour, weekday, and month. The selected configuration has 32 hidden units, one recurrent layer, no dropout, learning rate 0.001, and batch size 128. The selected run used CPU for 30 epochs; its best validation MAE occurred at epoch 27. The model predicts next-hour demand in MW.
+The one-hour target is the demand change, $\Delta y_t=y_{t+1}-y_t$. The reported MW forecast reconstructs demand as $\hat y_{t+1}=y_t+\widehat{\Delta y_t}$. XGBoost and TFT produce 17,854 train, 3,694 validation, and 3,695 test model rows after lag features. With a 168-row sequence, LSTM produces 17,687, 3,527, and 3,528 predictions. Thus LSTM validation/test metrics omit the first 167 feature-ready rows in each evaluation split and do not use precisely the same timestamps as the other models.
+
+The retained validation timestamps contain four long gaps and test timestamps contain 19. Since targets are formed by shifting one retained row, labels immediately before these gaps refer to the next retained observation rather than exactly one clock hour later. This small number of cases is disclosed as a horizon limitation.
+
+The retained validation timestamps contain four long gaps and test timestamps contain 19. Since the models form targets by shifting one retained row, labels immediately before these gaps refer to the next retained observation rather than exactly one clock hour later. This small number of cases is disclosed as a horizon limitation.
+
+\section{Phase 3: Model architecture and implementation}
+\subsection{Frameworks and design}
+XGBoost uses the XGBoost regressor API and squared-error objective. It predicts next-hour demand change from 15 forecast-available calendar, renewable, lag, and rolling features. The selected tree ensemble has depth 6 and 200 estimators.
+
+The LSTM uses PyTorch. Each example is a 168-hour by 15-feature sequence. A one-layer LSTM with 64 hidden units feeds a linear regression head. It minimizes MSE on training-scaled demand changes using Adam (learning rate 0.001); gradient norms are clipped at 1.0. Early stopping and trial selection use validation MAE in MW. The best validation checkpoint was reached at epoch 11; training stopped after epoch 16 with patience 5.
+
+TFT uses PyTorch Forecasting and a 168-hour encoder. Calendar variables are known at forecast time; load, solar, wind, and the demand-change target are handled as time-varying inputs. It minimizes MAE with Adam and gradient clipping. The selected larger trial has hidden size 48, four attention heads, hidden continuous size 24, dropout 0.15, learning rate 0.002, and batch size 64.
+
 \begin{figure}[H]\centering
-\begin{tikzpicture}[node distance=0.55cm,box/.style={draw=blue!55!black,rounded corners,fill=blue!6,minimum height=1.0cm,text width=2.7cm,align=center,font=\small},out/.style={box,fill=green!10}]
-\node[box] (in) {168-hour input window\\9 historical and calendar features};
-\node[box,right=of in] (lstm) {LSTM\\32 hidden units\\1 layer};
-\node[box,right=of lstm] (dense) {Dense\\regression head};
-\node[out,right=of dense] (y) {Demand at $t+1$\\MW};
-\draw[-{Stealth},thick] (in)--(lstm); \draw[-{Stealth},thick] (lstm)--(dense); \draw[-{Stealth},thick] (dense)--(y);
+\begin{tikzpicture}[node distance=0.55cm,box/.style={draw=blue!55!black,rounded corners,fill=blue!6,minimum height=0.85cm,text width=2.8cm,align=center,font=\small},out/.style={box,fill=green!10}]
+\node[box] (x) {168 hours x 15 features}; \node[box,right=of x] (l) {LSTM\\64 units\\one recurrent layer}; \node[box,right=of l] (d) {Linear\\regression head}; \node[out,right=of d] (y) {Predicted demand\\change};
+\draw[-{Stealth},thick] (x)--(l); \draw[-{Stealth},thick] (l)--(d); \draw[-{Stealth},thick] (d)--(y);
 \end{tikzpicture}
-\caption{Selected LSTM information flow. Inputs end before the forecast target hour.}
-\end{figure}
+\caption{Selected LSTM architecture. The output demand change is added to current demand to obtain the next-hour MW forecast.}\end{figure}
 
-\subsection{TFT architecture and selection}
-The TFT uses a 168-hour encoder and calendar variables known for the forecast timestamp; load, solar, and wind are treated as historical unknown inputs. The larger configuration was selected by validation MAE and trained with GPU. The supplied TFT summary reports hidden size 48, four attention heads, hidden continuous size 24, dropout 0.15, and learning rate 0.002.
 \begin{figure}[H]\centering
-\begin{tikzpicture}[node distance=0.5cm,box/.style={draw=blue!55!black,rounded corners,fill=blue!6,minimum height=0.95cm,text width=2.5cm,align=center,font=\small},out/.style={box,fill=green!10}]
-\node[box] (hist) {Historical load, solar, wind\\168-hour encoder};
-\node[box,right=of hist] (select) {Variable selection\\and recurrent processing};
-\node[box,right=of select] (attn) {Attention\\and gated blocks};
-\node[out,right=of attn] (forecast) {One-hour demand\\forecast (MW)};
-\draw[-{Stealth},thick] (hist)--(select); \draw[-{Stealth},thick] (select)--(attn); \draw[-{Stealth},thick] (attn)--(forecast);
+\begin{tikzpicture}[node distance=0.45cm,box/.style={draw=blue!55!black,rounded corners,fill=blue!6,minimum height=0.8cm,text width=2.6cm,align=center,font=\small},out/.style={box,fill=green!10}]
+\node[box] (h) {Historical 168-hour\\load and renewables}; \node[box,right=of h] (v) {Variable selection\\and recurrent layers}; \node[box,right=of v] (a) {Attention and\\gated blocks}; \node[out,right=of a] (o) {One-hour demand\\change forecast};
+\draw[-{Stealth},thick] (h)--(v); \draw[-{Stealth},thick] (v)--(a); \draw[-{Stealth},thick] (a)--(o);
 \end{tikzpicture}
-\caption{High-level TFT forecasting path (conceptual diagram).}
-\end{figure}
+\caption{High-level TFT forecasting path.}\end{figure}
 
-\subsection{Training curves}
-For regression, validation MAE is reported instead of classification accuracy. The LSTM run logged scaled training MSE and validation MAE by epoch; these use different units and are shown on separate axes.
+\subsection{Hyperparameter search}
+All trial choices and selected settings below are read from the saved tuning tables. Validation MAE selects a configuration; test data is used only for the final evaluation.
+\begin{table}[H]\centering\small\caption{LSTM trials.}\begin{tabular}{lrrrrr}\toprule Trial & Hidden/layers & Dropout & LR & Batch & Val MAE MW \\\midrule small & 32/1 & 0.00 & .0010 & 128 & 2,125.05 \\ balanced (selected) & 64/1 & 0.00 & .0010 & 128 & 1,998.05 \\ deeper & 64/2 & 0.10 & .0005 & 128 & 2,090.32 \\\bottomrule\end{tabular}\end{table}
+\begin{table}[H]\centering\small\caption{TFT trials.}\begin{tabular}{lrrrrr}\toprule Trial & Hidden & Heads & Hidden cont. & Dropout / LR & Val MAE MW \\\midrule small fast & 16 & 2 & 8 & .10 / .010 & 1,709.85 \\ balanced & 32 & 4 & 16 & .10 / .003 & 1,643.16 \\ regularized & 32 & 4 & 16 & .20 / .001 & 1,666.71 \\ larger (selected) & 48 & 4 & 24 & .15 / .002 & 1,566.80 \\\bottomrule\end{tabular}\end{table}
+
+XGBoost evaluates eight combinations: maximum depth $\{4,6\}$, learning rate $\{0.05,0.10\}$, and estimators $\{200,400\}$; subsample and column sample remain 0.8. The best validation MAE (3,604.19 MW) came from depth 6, learning rate 0.05, and 200 estimators.
+\begin{table}[H]\centering\small\caption{XGBoost search settings.}\begin{tabular}{lll}\toprule Parameter & Values tested & Selected \\\midrule max depth & 4, 6 & 6 \\ learning rate & 0.05, 0.10 & 0.05 \\ estimators & 200, 400 & 200 \\ subsample / colsample & 0.8 fixed & 0.8 / 0.8 \\\bottomrule\end{tabular}\end{table}
+
+\section{Phase 4: Training and empirical evaluation}
+\subsection{Validation strategy and metric choice}
+The models use a chronological 70/15/15 split and preserve the later test period for final evaluation. Regression predicts a continuous demand value in MW. MAE is directly interpretable as average absolute MW error; RMSE gives greater weight to large misses. Precision, recall, F1, and ROC-AUC require discrete classes or a defined threshold and are not appropriate for this continuous target. XGBoost also reports MAPE as a secondary percentage metric. There is no classification accuracy curve; training loss and validation MAE curves are the relevant learning curves.
+
+\begin{table}[H]\centering\caption{Latest reported validation and test results (MW).}\begin{tabular}{llrrr}\toprule Model & Split & MAE & RMSE & Prediction rows \\\midrule TFT & Validation & 1,566.80 & 3,316.47 & 3,694 \\ TFT & Test & 2,985.18 & 6,272.79 & 3,695 \\ LSTM & Validation & 1,998.05 & 3,762.90 & 3,527 \\ LSTM & Test & 3,567.73 & 6,641.47 & 3,528 \\ XGBoost & Validation & 3,604.19 & 6,188.10 & 3,694 \\ XGBoost & Test & 4,619.62 & 7,930.16 & 3,695 \\\bottomrule\end{tabular}\end{table}
+
+TFT has the lowest reported errors on both sets, LSTM is next, and XGBoost is third. TFT's test MAE is 90.5\% above its validation MAE; the increase is 78.6\% for LSTM and 28.2\% for XGBoost. XGBoost MAPE is 1.93\% on validation and 2.42\% on test. These aggregate metrics share the same source splits. Because LSTM excludes 167 initial feature-ready timestamps per split, its direct score comparison is not a strict same-timestamp comparison.
+
+\subsection{Learning curves}
+LSTM training MSE is shown on its own scaled axis; validation MAE is shown in MW. These have different units and must not be compared as if they were one loss scale.
 \begin{figure}[H]\centering
-\begin{minipage}{0.48\linewidth}\centering
-\begin{tikzpicture}\begin{axis}[width=\linewidth,height=5.2cm,xlabel=Epoch,ylabel={Training MSE (scaled)},title={LSTM training loss},xmin=1,xmax=30,grid=major]
-\addplot[blue,thick] coordinates {(1,0.367105)(2,0.085854)(3,0.060701)(4,0.049274)(5,0.042806)(6,0.038321)(7,0.035202)(8,0.032585)(9,0.031208)(10,0.028800)(11,0.027091)(12,0.026264)(13,0.025468)(14,0.024889)(15,0.024092)(16,0.023781)(17,0.023304)(18,0.022584)(19,0.021966)(20,0.021509)(21,0.021032)(22,0.020831)(23,0.020699)(24,0.020566)(25,0.020463)(26,0.020898)(27,0.019313)(28,0.019160)(29,0.018752)(30,0.021187)};
-\end{axis}\end{tikzpicture}
-\end{minipage}\hfill
-\begin{minipage}{0.48\linewidth}\centering
-\begin{tikzpicture}\begin{axis}[width=\linewidth,height=5.2cm,xlabel=Epoch,ylabel={Validation MAE (MW)},title={LSTM validation error},xmin=1,xmax=30,grid=major]
-\addplot[orange!85!black,thick] coordinates {(1,6798.663)(2,5137.559)(3,4313.185)(4,3936.614)(5,3462.535)(6,3193.648)(7,3105.922)(8,2948.945)(9,2756.675)(10,2742.620)(11,2583.321)(12,2501.938)(13,2468.030)(14,2425.820)(15,2398.766)(16,2287.212)(17,2270.555)(18,2266.797)(19,2266.033)(20,2446.024)(21,2317.703)(22,2184.983)(23,2187.730)(24,2179.538)(25,2173.311)(26,2182.571)(27,2128.005)(28,2153.673)(29,2133.947)(30,2170.927)};
-\end{axis}\end{tikzpicture}
-\end{minipage}
-\caption{User-provided LSTM epoch history. The lowest validation MAE is at epoch 27.}
-\end{figure}
-\begin{figure}[H]\centering
-\IfFileExists{figures/tft\_training\_curve.png}{\includegraphics[width=0.82\linewidth]{figures/tft\_training\_curve.png}}{\fbox{Copy the supplied TFT training curve to figures/tft\_training\_curve.png before compiling.}}
-\caption{TFT training curve from the selected trial.}\end{figure}
-\section{Phase 4: Results and Evaluation}
-\begin{table}[H]\centering\caption{Like-for-like TFT and LSTM results (MW).}\begin{tabular}{llrrl}\toprule Model & Split & MAE & RMSE & Selection/context \\\midrule TFT & Validation & 1,874.62 & 3,616.16 & Larger; validation-MAE selection \\
-TFT & Test & 3,542.41 & 6,610.82 & Held-out period \\
-LSTM & Validation & 2,128.01 & 3,770.96 & Small; validation-MAE selection \\
-LSTM & Test & 4,258.34 & 6,929.33 & Held-out period \\
-LSTM & Training & Not recorded & Not recorded & Only scaled training MSE logged \\\bottomrule\end{tabular}\end{table}
+\begin{minipage}{0.48\linewidth}\centering\begin{tikzpicture}\begin{axis}[width=\linewidth,height=5.0cm,xlabel=Epoch,ylabel={Scaled training MSE},xmin=1,xmax=16,ymin=0.25,ymax=0.68,grid=major]
+\addplot[blue,thick] coordinates {(1,.6278)(2,.4780)(3,.4177)(4,.3800)(5,.3522)(6,.3401)(7,.3401)(8,.3247)(9,.3167)(10,.3119)(11,.3086)(12,.3030)(13,.2997)(14,.2953)(15,.2919)(16,.2876)};
+\end{axis}\end{tikzpicture}\end{minipage}\hfill
+\begin{minipage}{0.48\linewidth}\centering\begin{tikzpicture}\begin{axis}[width=\linewidth,height=5.0cm,xlabel=Epoch,ylabel={Validation MAE (MW)},xmin=1,xmax=16,ymin=1800,ymax=2900,grid=major]
+\addplot[orange,thick] coordinates {(1,2764.38)(2,2590.31)(3,2329.78)(4,2273.56)(5,2280.61)(6,2259.56)(7,2088.82)(8,2111.81)(9,2023.66)(10,2112.94)(11,1998.05)(12,2042.21)(13,2081.53)(14,2025.51)(15,2092.34)(16,2000.99)};
+\end{axis}\end{tikzpicture}\end{minipage}
+\caption{LSTM history from the latest run. The lowest validation MAE occurred at epoch 11; early stopping ended training at epoch 16. Different units use separate axes.}\end{figure}
+\begin{figure}[H]\centering\IfFileExists{figures/tft\_training\_curve.png}{\includegraphics[width=0.82\linewidth]{figures/tft\_training\_curve.png}}{TFT curve image not found.}\caption{TFT training and validation loss from its selected trial.}\end{figure}
 
-TFT has lower reported MAE and RMSE than the supplied LSTM run on both validation and test periods. Test errors exceed validation errors for both models, indicating weaker accuracy on the later holdout. These results describe a single chronological holdout and do not establish that renewable generation caused a change in demand.
+\subsection{Error analysis and bias check}
+The LSTM mean signed error (prediction minus actual) is -114.50 MW on validation and -208.54 MW on test, indicating small average underprediction. On the test set, MAE is highest in the lowest actual-demand quartile (4,365 MW); the model overpredicts that quartile by 2,129 MW on average and underpredicts the highest quartile by 2,058 MW. Hour 23 has the largest LSTM MAE: 6,241 MW on validation and 12,063 MW on test. TFT also has its largest test hourly MAE at hour 23 (12,640 MW). This is a targeted check by demand level and hour, not a demographic fairness test; the dataset contains no demographic attributes.
 
-The old XGBoost result is excluded from the current research findings and comparison. The attached ZIP's cleaning report lists 12,984 final rows for that run, unlike the 25,678-row TFT/LSTM experiment; its metrics are therefore not presented as comparable evidence.
-\section{Contribution Table: Project Modules}
-The table below lists the main project modules and their implementation paths. The project team listed on the title page is Abdul Muiz, Abdullah Aftab, and Arqum Umais.
-\begin{longtable}{p{0.36\linewidth}p{0.58\linewidth}}\toprule Project module & Implementation files \\\midrule
-Data audit and cleaning & \texttt{audit\_india\_dataset.py}; \texttt{clean\_india\_grid.py} \\
-TFT model & \texttt{src/models/tft\_model.py} \\
-XGBoost implementation (excluded from current findings) & \texttt{src/models/xgboost\_model.py} \\
-LSTM model & \texttt{src/models/lstm\_model.py} \\
-Report and documentation & \texttt{gridshift\_phase1\_phase4.tex}; \texttt{README.md} \\\bottomrule\end{longtable}
-\section{Limitations}
-The supplied LSTM run did not report training MAE or RMSE; the available history contains scaled training MSE and validation MAE only. Results reflect one chronological holdout. The earlier XGBoost run used 12,984 rows and is excluded from the 25,678-row TFT/LSTM findings.
+All three models have larger test than validation errors. This indicates that the later period is more difficult for these fitted models and may reflect temporal distribution change. One chronological holdout cannot identify the cause or ensure future generalization. Prediction-error analysis for XGBoost is limited by the supplied artifacts: its test predictions are saved, but its validation prediction file is not.
+
+\section{Git collaboration and contribution table}
+The entries map modules to the commit author strings and commit IDs in the repository history; they do not infer personal identity from a Git username.
+\begin{longtable}{p{0.28\linewidth}p{0.26\linewidth}p{0.37\linewidth}}\toprule Module & Git author & Evidence in history \\\midrule
+Cleaning, chronological splits, shared loader & Abdullah Aftab & \texttt{1e9fc02} shared split and loader; \texttt{f7f866b} cleaning/data update \\
+XGBoost implementation and run & Abdullah Aftab & \texttt{f7f866b} \\
+TFT implementation and evaluation & Abdul Muiz & \texttt{8daf0c4}; \texttt{f6c3cdb} \\
+LSTM implementation, results, and latest split alignment & WikidSmellz & \texttt{7c7db34}; \texttt{014b6c1} \\
+Prior report and README update & WikidSmellz & \texttt{7c7db34} \\
+\bottomrule\end{longtable}
+This report refresh and the related cleaning-report updates are not yet represented in Git history. Commit them under the actual contributor account(s) before submission; this report does not assign those new changes to a prior author.
+
+\section{Reproducibility and limitations}
+The repository includes \texttt{requirements.txt}; install a PyTorch build suited to the local CPU/GPU before training. Run \texttt{cleaneddata.py} to regenerate shared split files, then run the model scripts from the repository root. Rebuilding splits overwrites prior inputs, so preserve the outputs and settings for each model run together. Current checkpoints are smaller than 100 MB; the large-file external-host rule does not apply to these saved weights.
+
+This comparison represents one chronological holdout and the exact artifacts listed in the repository. LSTM's first 167 feature-ready rows in each validation/test partition are unavailable to its 168-row sequences. Retaining the row-count note prevents interpreting the reported figures as strictly identical timestamp samples. The study is observational and does not establish that renewable generation causes demand changes.
+
 \section{References}
 \begin{enumerate}[leftmargin=*]
-\item Mukherjee, D., Kalita, K., \& Kumar, S. (2025). \textit{Electricity Demand, Solar and Wind Generation Data (September 2021--June 2025) of India at 1-hour interval} (Version 2). Mendeley Data. \url{https://doi.org/10.17632/y58jknpgs8.2}.
+\item Mukherjee, D., Kalita, K., \& Kumar, S. (2025). \textit{Electricity Demand, Solar and Wind Generation Data (September 2021-June 2025) of India at 1-hour interval} (Version 2). Mendeley Data. \url{https://doi.org/10.17632/y58jknpgs8.2}.
 \item Hochreiter, S. \& Schmidhuber, J. (1997). Long Short-Term Memory. \textit{Neural Computation, 9}(8), 1735--1780. \url{https://doi.org/10.1162/neco.1997.9.8.1735}.
 \item Lim, B., Arik, S. O., Loeff, N., \& Pfister, T. (2021). Temporal Fusion Transformers for Interpretable Multi-horizon Time Series Forecasting. \textit{International Journal of Forecasting, 37}(4), 1748--1764. \url{https://doi.org/10.1016/j.ijforecast.2021.03.012}.
 \end{enumerate}

@@ -1,60 +1,49 @@
 {
-  "source_files": [
-    "January 2024- June 2025.xlsx"
-  ],
-  "source_sheet": "Report",
-  "timestamp_format": "%d-%m-%Y %H:%M:%S",
-  "configured_columns": {
-    "timestamp": "Timestamp",
-    "load": "Demand (MW)",
-    "solar": "Solar (MW)",
-    "wind": "Wind (MW)"
-  },
-  "rows_after_read_and_empty_row_removal": 12990,
-  "rows_after_timestamp_parse": 12984,
-  "unparseable_timestamp_rows": 6,
+  "report_version": 2,
+  "dataset": "GridShift shared modeling dataset",
+  "source_file": "outputs/processed/grid_hourly_merged.csv",
+  "source_rows": 37392,
+  "date_start": "2021-09-01 00:00:00",
+  "date_end": "2025-12-06 23:00:00",
   "duplicate_timestamp_rows_detected_and_dropped": 0,
+  "rows_after_hourly_resample": 37392,
   "missing_before_interpolation": {
-    "load": 0,
-    "solar": 0,
-    "wind": 0
+    "load": 11714,
+    "solar": 11714,
+    "wind": 11714
   },
+  "max_interpolation_gap_hours": 3,
   "missing_after_short_interpolation": {
-    "load": 0,
-    "solar": 0,
-    "wind": 0
+    "load": 11645,
+    "solar": 11645,
+    "wind": 11645
   },
-  "rows_dropped_for_missing_load": 0,
-  "final_rows": 12984,
-  "train_rows": 9088,
-  "val_rows": 1947,
-  "test_rows": 1949,
+  "rows_dropped_for_missing_load": 11645,
+  "final_rows": 25747,
   "split_method": "chronological; 70% train, 15% validation, 15% test",
-  "scaler": "StandardScaler fit on training rows only, then applied to validation and test rows",
-  "outlier_summary": {
-    "load": {
-      "q1": 183704.85749999998,
-      "q3": 208060.5275,
-      "iqr_lower_bound": 147171.35249999998,
-      "iqr_upper_bound": 244594.03250000003,
-      "flagged_count": 419,
-      "policy": "flag"
-    },
-    "solar": {
-      "q1": 102.64750000000001,
-      "q3": 33409.71000000001,
-      "iqr_lower_bound": -49857.946250000015,
-      "iqr_upper_bound": 83370.30375000002,
-      "flagged_count": 0,
-      "policy": "flag"
-    },
-    "wind": {
-      "q1": 4438.6975,
-      "q3": 11973.012499999999,
-      "iqr_lower_bound": -6862.774999999998,
-      "iqr_upper_bound": 23274.484999999997,
-      "flagged_count": 318,
-      "policy": "flag"
-    }
-  }
+  "split_rows": {
+    "train": 18022,
+    "validation": 3862,
+    "test": 3863
+  },
+  "non_hourly_timestamp_gaps_by_split": {
+    "train": 0,
+    "validation": 4,
+    "test": 19
+  },
+  "split_files": [
+    "outputs/processed/train_scaled.csv",
+    "outputs/processed/val_scaled.csv",
+    "outputs/processed/test_scaled.csv"
+  ],
+  "scaler": "StandardScaler fit on training rows only; applied to validation and test",
+  "scaled_columns": ["load_scaled", "solar_scaled", "wind_scaled"],
+  "outlier_policy": "Outlier flags are not used to remove rows in this modeling pipeline.",
+  "model_feature_rows_after_lags": {
+    "train": 17854,
+    "validation": 3694,
+    "test": 3695
+  },
+  "target_horizon_note": "Model target creation shifts to the next retained row. When adjacent timestamps are separated by a long unresolved gap, that label is not exactly one clock hour ahead.",
+  "report_note": "This replaces the stale 12,984-row report for an unrelated workbook. These counts are verified from the current merged CSV and the split files loaded by TFT, XGBoost, and LSTM."
 }

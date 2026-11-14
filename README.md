@@ -1,179 +1,79 @@
-# GridShift: Hourly Electricity Demand Forecasting
+# GridShift Electricity Demand Forecasting
 
-GridShift is a research project that forecasts India's hourly electricity demand from historical demand, solar generation, wind generation, and calendar patterns. It compares a Temporal Fusion Transformer (TFT) with a Long Short-Term Memory network (LSTM) using a chronological holdout, and studies how forecast error changes in later observations.
+GridShift compares one-hour-ahead forecasts of India electricity demand using XGBoost, a Long Short-Term Memory network (LSTM), and a Temporal Fusion Transformer (TFT). This is an offline research prototype, not an operational grid-control system.
 
-This repository contains data-audit and preprocessing materials, model-training scripts, experiment outputs, and the Phase 1-4 research report. It is an offline research prototype; it is not intended for grid dispatch or other operational decisions.
+## Current dataset and split
 
-## Research question
+All three models load the same prepared files through `src/data/prepare_data.py`:
 
-How accurately can sequence models forecast electricity demand one hour ahead, and how does accuracy differ between validation data and a later held-out test period?
+- `outputs/processed/train_scaled.csv`: 18,022 rows
+- `outputs/processed/val_scaled.csv`: 3,862 rows
+- `outputs/processed/test_scaled.csv`: 3,863 rows
+- Total prepared rows: 25,747
 
-The study is observational. Relationships between demand and renewable generation do not, by themselves, show that solar or wind generation caused demand changes.
+The current source is `outputs/processed/grid_hourly_merged.csv` (37,392 hourly timestamps). `cleaneddata.py` resamples hourly, interpolates internal gaps up to three hours, drops rows with unresolved missing demand, creates cyclical calendar features, and writes chronological 70/15/15 splits. The scaler is fit on train only. The previous 12,984-row audit summary described an unrelated workbook; the corrected current cleaning record is `outputs/processed/audit/cleaning_report.json` and its readable companion is `outputs/processed/audit/cleaning_report.md`.
 
-## Current comparable results
+After target, lag, and rolling features are created, model-ready counts are 17,854 train, 3,694 validation, and 3,695 test. The LSTM also requires a 168-row sequence and therefore predicts 17,687 / 3,527 / 3,528 samples. Its validation and test metrics cover fewer, later timestamps than TFT/XGBoost; keep that sample-count difference in mind when comparing scores.
 
-TFT and LSTM use the same modeling file, target, one-hour forecast horizon, and chronological split: **25,678 complete rows**, divided into **17,974 training / 3,852 validation / 3,852 test rows**. Values are in megawatts (MW).
+The retained validation timestamps contain 4 long gaps and the test timestamps contain 19. Targets use the next retained row, so the few labels immediately before these gaps are not exactly one clock hour ahead. The model reports therefore describe a nominal one-hour forecast with these gap cases disclosed.
 
-| Model | Split | MAE (MW) | RMSE (MW) | Selected configuration | Device |
-|---|---|---:|---:|---|---|
-| TFT | Validation | 1,874.62 | 3,616.16 | Larger configuration; selected by validation MAE | GPU |
-| TFT | Test | 3,542.41 | 6,610.82 | Held-out evaluation | GPU |
-| LSTM | Validation | 2,128.01 | 3,770.96 | Small configuration; selected by validation MAE | CPU |
-| LSTM | Test | 4,258.34 | 6,929.33 | Held-out evaluation | CPU |
+## Latest model results
 
-On this split, TFT has lower reported MAE and RMSE on both validation and test data. The LSTM run lasted 30 epochs with a 168-hour lookback; its best validation MAE occurred at epoch 27. Training MAE and RMSE were not recorded for that run. Its history contains scaled training MSE and validation MAE instead.
+MAE and RMSE are in MW. Lower is better. Model selection uses validation MAE; test remains held out.
 
-The legacy XGBoost experiment is **excluded from this comparison**. The cleaning report in the supplied project archive records 12,984 rows for that experiment, so its scores are not directly comparable to the 25,678-row TFT and LSTM results.
+| Model | Split | MAE | RMSE | Selected trial |
+|---|---|---:|---:|---|
+| TFT | Validation | 1,566.80 | 3,316.47 | larger |
+| TFT | Test | 2,985.18 | 6,272.79 | larger |
+| LSTM | Validation | 1,998.05 | 3,762.90 | balanced |
+| LSTM | Test | 3,567.73 | 6,641.47 | balanced |
+| XGBoost | Validation | 3,604.19 | 6,188.10 | depth 6, lr 0.05, 200 trees |
+| XGBoost | Test | 4,619.62 | 7,930.16 | selected on validation MAE |
 
-## Dataset
+TFT has the lowest reported MAE and RMSE on both periods; LSTM is second and XGBoost is third. These scores use the same source splits, but LSTM scores use fewer prediction timestamps because of its sequence window.
 
-The project uses the hourly India electricity-demand, solar-generation, and wind-generation dataset by Mukherjee, Kalita, and Kumar (2025), Mendeley Data, Version 2. The dataset record describes observations from the combined five regional grid networks.
+## Modeling approach
 
-- DOI: <https://doi.org/10.17632/y58jknpgs8.2>
-- Dataset page: <https://data.mendeley.com/datasets/y58jknpgs8/2>
-- License listed by the dataset record: CC BY 4.0
+The forecast is the next hour's demand, reconstructed as current demand plus the predicted one-hour demand change. Calendar sine/cosine terms, solar, wind, load lags, and rolling load means provide forecast-available features.
 
-The dataset record has a date-range discrepancy: its title and file list refer to September 2021 through June 2025, while its description text refers to September 2021 through December 2023. Confirm coverage from workbook timestamps when reproducing the raw-data workflow.
+- **XGBoost:** `XGBRegressor`, squared-error objective, tuned on eight combinations of max depth (4/6), learning rate (0.05/0.10), and trees (200/400); subsample and column sample each 0.8.
+- **LSTM:** PyTorch `nn.LSTM` plus a linear regression head. It uses a 168-hour lookback, MSE on training-scaled demand changes, Adam, gradient clipping at 1.0, and validation MAE for early stopping and selection.
+- **TFT:** PyTorch Forecasting `TemporalFusionTransformer`, 168-hour encoder, MAE loss, Adam, gradient clipping, and validation MAE selection.
 
-### Modeling data
+For LSTM, three settings were tested: 32 hidden units/one layer/no dropout/lr 0.001; 64/one/no dropout/lr 0.001; and 64/two/dropout 0.1/lr 0.0005. All use batch size 128. The balanced 64-unit, one-layer trial was selected; training stopped after 16 epochs and the best checkpoint was epoch 11.
 
-The ready-to-run LSTM script reads:
+For TFT, four configurations were tested. The selected larger trial uses hidden size 48, four attention heads, hidden continuous size 24, dropout 0.15, learning rate 0.002, and batch size 64.
 
-```text
-outputs/processed/grid_hourly_merged.csv
-```
+## Evaluation and error analysis
 
-The script drops rows without a valid timestamp, demand, solar, or wind value, then checks that the resulting data has exactly 25,678 rows and the expected split. It stops if the data does not match. Keep the CSV used for the TFT experiment unchanged when reproducing this comparison.
+This is continuous-value regression. MAE gives average absolute error in MW and is easy to interpret; RMSE penalizes large misses more heavily. Precision, recall, F1, and ROC-AUC require class labels or a defined threshold and are not appropriate for the continuous-demand target. MAPE is reported for XGBoost as a secondary percentage measure.
 
-## Methods
+On LSTM predictions, mean signed error (prediction minus actual) is -114.50 MW on validation and -208.54 MW on test, indicating slight average underprediction. Test MAE by actual-demand quartile is highest in the lowest-demand quartile (4,365 MW); the model tends to overpredict that group and underpredict the highest-demand quartile. Hour 23 has the largest LSTM MAE: 6,241 MW on validation and 12,063 MW on test. TFT predictions show the same late-hour challenge, with test MAE 12,640 MW at hour 23. This is a targeted bias check by demand level and time of day; the dataset has no demographic groups to test.
 
-- **Forecast target:** Demand (MW) one hour ahead.
-- **Input window:** the preceding 168 hours (seven days).
-- **Split:** chronological 70/15/15; no random shuffling across time periods.
-- **Model selection:** validation MAE. The test set is held out for final evaluation.
-- **LSTM inputs:** demand, solar, wind, and sine/cosine encodings for hour of day, weekday, and month.
-- **Scaling:** the LSTM script estimates feature and target means and standard deviations from training rows only.
-- **Metrics:** MAE and RMSE in MW. Classification accuracy is not applicable to this regression task.
+All models have higher errors on the later test period than validation. This supports caution about temporal distribution shift; one holdout does not establish causation or guarantee future performance.
 
-At each one-hour forecast, the LSTM uses historical observations up to the forecast origin. Later measured values are used only as history for subsequent one-hour-ahead forecasts, consistent with rolling one-step-ahead evaluation.
+## Run the pipeline
 
-## Repository layout
-
-```text
-.
-├── src/
-│   ├── data/
-│   │   └── prepare_data.py
-│   └── models/
-│       ├── lstm_model.py
-│       ├── tft_model.py
-│       └── xgboost_model.py
-├── outputs/
-│   ├── processed/
-│   │   └── grid_hourly_merged.csv
-│   └── results/
-├── figures/
-├── audit_india_dataset.py
-├── clean_india_grid.py
-├── gridshift_phase1_phase4.tex
-└── gridshift_phase3_4_report.pdf
-```
-
-The precise files included may vary by project checkout. The XGBoost script is retained as a project artifact, but its legacy run is not part of the current TFT/LSTM findings.
-
-## Run the LSTM
-
-Run commands from the project root, the folder containing `src/` and `outputs/`.
-
-### Install dependencies
+Install dependencies from `requirements.txt`. Choose a PyTorch build compatible with your hardware/CUDA setup if you plan to use GPU training.
 
 ```powershell
-python -m pip install pandas numpy scikit-learn torch
-```
-
-For GPU training, install the PyTorch build that matches your CUDA and driver setup using the official PyTorch installation instructions. Check whether PyTorch can see CUDA with:
-
-```powershell
-python -c "import torch; print(torch.cuda.is_available())"
-```
-
-### Train and evaluate
-
-```powershell
+python cleaneddata.py --input-file outputs/processed/grid_hourly_merged.csv --output-dir outputs/processed
+python src/models/xgboost_model.py
 python src/models/lstm_model.py
-```
-
-The script uses CUDA automatically when available. To force CPU:
-
-```powershell
-python src/models/lstm_model.py --cpu
-```
-
-Optional parameters:
-
-```powershell
-python src/models/lstm_model.py --lookback-hours 168 --max-epochs 30 --patience 5 --seed 42
-```
-
-The default run trains three LSTM configurations and selects the best one using validation MAE. It then evaluates that selected configuration on the test split.
-
-## LSTM output files
-
-The script writes experiment artifacts to `outputs/results/`:
-
-| File | Contents |
-|---|---|
-| `lstm_metrics.csv` | Validation and test MAE/RMSE in MW |
-| `lstm_tuning.csv` | Validation results for each tested configuration |
-| `lstm_selected_settings.json` | Selected configuration, device, row counts, and split sizes |
-| `lstm_training_history.csv` | Epoch-level scaled training MSE and validation MAE |
-| `lstm_validation_predictions.csv` | Actual and predicted validation demand |
-| `lstm_test_predictions.csv` | Actual and predicted test demand |
-| `lstm_best.pt` | Selected model weights and scaling parameters |
-
-For a reported run, preserve the metrics, settings, prediction files, and training history together. The run history supplied for the results above does not contain training MAE/RMSE.
-
-## Run the TFT
-
-The TFT training script is `src/models/tft_model.py`. It uses the same merged CSV by default, automatically chooses GPU when available, and writes its selected settings, metrics, predictions, tuning results, checkpoint, and training curve under `outputs/results/`.
-
-Install compatible PyTorch Lightning and PyTorch Forecasting dependencies for the local PyTorch version, then run:
-
-```powershell
 python src/models/tft_model.py
 ```
 
-Use `--cpu` to force CPU or `--data path\to\grid_hourly_merged.csv` to provide a different input file. The TFT run evaluates several configurations, selects by validation MAE, and evaluates the selected model on the test period.
+Run `cleaneddata.py` first only when intentionally rebuilding the shared splits. Running it overwrites the three model input files and invalidates results from previous split versions. The model scripts write metrics, settings, tuning results, predictions, and checkpoints to `outputs/results/`.
 
-## Raw-data audit and preprocessing
+## Phase 3 and 4 report
 
-The repository also includes scripts for auditing and cleaning the original Excel workbooks. The workbook workflow requires the raw dataset files and the configured sheet, header, timestamp, and measurement columns to match the actual workbook structure. Inspect the audit report before running the cleaner; do not assume workbook headers or sheet layouts.
+- `gridshift_phase1_phase4.tex`: editable report source.
+- `gridshift_phase3_4_report.pdf`: Phase 3/4 architecture, tuning, evaluation, curves, error analysis, and Git contribution table.
 
-Typical setup commands are:
+## Git contribution map
 
-```powershell
-python -m pip install pandas numpy openpyxl matplotlib seaborn scikit-learn joblib
-python audit_india_dataset.py --input-dir data/raw --output-dir outputs/audit
-python clean_india_grid.py --input-dir data/raw --output-dir outputs/processed
-```
+The table in the report follows Git commit authors exactly as recorded in this repository. Key commits include `1e9fc02` and `f7f866b` (Abdullah Aftab: shared data preparation and XGBoost), `8daf0c4` and `f6c3cdb` (Abdul Muiz: TFT), and `7c7db34` and `014b6c1` (WikidSmellz: LSTM results/model updates and prior report). The account name `WikidSmellz` is shown as Git records it; it is not expanded into a person’s name. This report and cleaning-report refresh are not yet in Git history and should be committed under the actual contributor account(s).
 
-The cleaned dataset used for the reported model comparison is already provided at `outputs/processed/grid_hourly_merged.csv` in the project archive. Re-running raw preprocessing may create a different row set; if so, the LSTM script's row-count guard will stop rather than silently run a non-matching comparison.
+## Dataset citation
 
-## Research report
-
-- `gridshift_phase1_phase4.tex` is the editable LaTeX source covering project scope, data, models, and results.
-- `gridshift_phase3_4_report.pdf` is the rendered report.
-- `figures/tft_training_curve.png` is used by the LaTeX source for the TFT training curve.
-
-Compile the LaTeX source from the project root after placing the TFT curve image in `figures/`:
-
-```powershell
-pdflatex gridshift_phase1_phase4.tex
-pdflatex gridshift_phase1_phase4.tex
-```
-
-The LSTM epoch curves are defined in the LaTeX source from the run history. The contribution table lists project modules and implementation paths.
-
-## References
-
-Mukherjee, D., Kalita, K., & Kumar, S. (2025). *Electricity Demand, Solar and Wind Generation Data (September 2021-June 2025) of India at 1-hour interval* (Version 2). Mendeley Data. <https://doi.org/10.17632/y58jknpgs8.2>.
+Mukherjee, D., Kalita, K., & Kumar, S. (2025). *Electricity Demand, Solar and Wind Generation Data (September 2021-June 2025) of India at 1-hour interval* (Version 2). Mendeley Data. [doi:10.17632/y58jknpgs8.2](https://doi.org/10.17632/y58jknpgs8.2).
